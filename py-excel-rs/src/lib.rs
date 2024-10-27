@@ -10,6 +10,7 @@ use numpy::PyReadonlyArray2;
 use postgres::PyPostgresClient;
 use utils::chrono_to_xlsx_date;
 use pyo3::{prelude::*, types::{PyBytes, PyList}};
+use excel_rs_xlsx::typed_sheet::{TYPE_STRING, TYPE_NUMBER, TYPE_DATE};
 
 #[pymodule]
 fn _excel_rs<'py>(m: &Bound<'py, PyModule>) -> PyResult<()> {
@@ -20,22 +21,31 @@ fn _excel_rs<'py>(m: &Bound<'py, PyModule>) -> PyResult<()> {
 
         let output_buffer = vec![];
         let mut workbook = WorkBook::new(Cursor::new(output_buffer));
-        let mut worksheet = workbook.get_worksheet(String::from("Sheet 1"));
+        let mut worksheet = workbook.get_typed_worksheet(String::from("Sheet 1"));
 
         let mut reader = bytes_to_csv(x);
         let headers = get_headers(&mut reader);
 
-        if headers.is_some() {
-            let headers_to_bytes = headers.unwrap().iter().to_owned().collect();
-            if let Err(e) = worksheet.write_row(headers_to_bytes) {
+        if let Some(headers) = headers {
+            let headers_to_bytes = headers.iter().to_owned().collect();
+            let header_types = vec![TYPE_STRING; headers.len()];
+            if let Err(e) = worksheet.write_row(headers_to_bytes, &header_types) {
                 panic!("{e}");
             }
         }
 
-        while let Some(record) = get_next_record(&mut reader) {
-            let row_data = record.iter().to_owned().collect();
-            if let Err(e) = worksheet.write_row(row_data) {
+        if let Some(record) = get_next_record(&mut reader) {
+            let row_data: Vec<&[u8]> = record.iter().to_owned().collect();
+            let types = worksheet.infer_row_types(&row_data);
+            if let Err(e) = worksheet.write_row(row_data, &types) {
                 panic!("{e}");
+            }
+
+            while let Some(record) = get_next_record(&mut reader) {
+                let row_data = record.iter().to_owned().collect();
+                if let Err(e) = worksheet.write_row(row_data, &types) {
+                    panic!("{e}");
+                }
             }
         }
 
@@ -125,14 +135,13 @@ fn _excel_rs<'py>(m: &Bound<'py, PyModule>) -> PyResult<()> {
             }
         });
 
-        let mut xlsx_types: Vec<String> = Vec::with_capacity(ndarray.len());
-
-        for item in types.iter() {
-            let unwrapped = item.extract::<String>().unwrap_or(String::from(""));
-            xlsx_types.push(unwrapped);
-        }
-
-        let borrowed_xlsx_types = xlsx_types.iter().map(|x| x.as_str()).collect();
+        let xlsx_types: Vec<&'static str> = types.iter().map(|x| {
+            match x.extract::<String>().unwrap().as_str() {
+                "n" => TYPE_NUMBER,
+                "d" => TYPE_DATE,
+                _ => TYPE_STRING
+            }
+        }).collect();
 
         let output_buffer = vec![];
         let mut workbook = WorkBook::new(Cursor::new(output_buffer));
@@ -140,7 +149,7 @@ fn _excel_rs<'py>(m: &Bound<'py, PyModule>) -> PyResult<()> {
 
         for row in ndarray_str.rows() {
             let bytes = row.map(|x| x.as_bytes()).to_vec();
-            if let Err(e) = worksheet.write_row(bytes, &borrowed_xlsx_types) {
+            if let Err(e) = worksheet.write_row(bytes, &xlsx_types) {
                 panic!("{e}");
             }
         }
